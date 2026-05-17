@@ -1,7 +1,7 @@
 name: Build DMG
 
 on:
-  workflow_dispatch:   # 手动触发 —— 在 GitHub 页面点按钮即可
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -14,9 +14,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Download yt-dlp (macOS standalone)
         run: |
-          brew install yt-dlp ffmpeg create-dmg
+          curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_mos -o /tmp/yt-dlp
+          chmod +x /tmp/yt-dlp
+          /tmp/yt-dlp --version
+
+      - name: Download ffmpeg (macOS static)
+        run: |
+          # 尝试从 evermeet.cx 下载 macOS 静态 ffmpeg
+          curl -sL https://evermeet.cx/ffmpeg/ffmpeg/8.1.1/ffmpeg-8.1.1.7z -o /tmp/ffmpeg.7z
+          bsdtar xf /tmp/ffmpeg.7z -C /tmp 2>/dev/null || {
+            # 备选: 从 github 下载编译好的二进制
+            curl -sL https://github.com/eugeneware/ffmpeg-static/releases/latest/download/darwin-x64 -o /tmp/ffmpeg
+          }
+          chmod +x /tmp/ffmpeg 2>/dev/null
+          /tmp/ffmpeg -version 2>&1 | head -1 || echo "ffmpeg 下载失败，将使用系统安装"
 
       - name: Build (Release)
         run: swift build -c release
@@ -25,10 +41,20 @@ jobs:
         run: |
           APP="YouTubeToWAV.app"
           mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Resources"
+          mkdir -p "$APP/Contents/Resources/bin"
 
+          # 拷贝编译产物
           cp .build/release/YouTubeToWAV "$APP/Contents/MacOS/"
-          cp -r Sources/YouTubeToWAV/Resources/* "$APP/Contents/Resources/"
+
+          # 拷贝资源文件
+          cp -r Sources/YouTubeToWAV/Resources/* "$APP/Contents/Resources/" 2>/dev/null || true
+
+          # 将 yt-dlp 和 ffmpeg 打包进 .app 的 bin/ 目录
+          cp /tmp/yt-dlp "$APP/Contents/Resources/bin/"
+          if [ -f /tmp/ffmpeg ] && [ -x /tmp/ffmpeg ]; then
+            cp /tmp/ffmpeg "$APP/Contents/Resources/bin/"
+          fi
+          ls -lh "$APP/Contents/Resources/bin/"
 
           # Info.plist
           cat > "$APP/Contents/Info.plist" <<-PLIST
@@ -63,7 +89,7 @@ jobs:
 
           echo "APPL????" > "$APP/Contents/PkgInfo"
 
-          # Ad-hoc 签名（让 macOS 允许运行）
+          # Ad-hoc 签名（包含 bin/ 里的可执行文件）
           codesign --force --deep --sign - "$APP"
 
       - name: Create DMG

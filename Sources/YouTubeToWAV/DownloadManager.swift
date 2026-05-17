@@ -13,9 +13,9 @@ actor DownloadManager {
         var errorDescription: String? {
             switch self {
             case .ytDlpNotInstalled:
-                return "未安装 yt-dlp\n请在终端运行: brew install yt-dlp"
+                return "未找到 yt-dlp，请通过 Homebrew 安装:\nbrew install yt-dlp"
             case .ffmpegNotInstalled:
-                return "未安装 ffmpeg\n请在终端运行: brew install ffmpeg"
+                return "未找到 ffmpeg，请通过 Homebrew 安装:\nbrew install ffmpeg"
             case .invalidURL:
                 return "请输入有效的 YouTube 链接"
             case .downloadFailed(let msg):
@@ -26,60 +26,99 @@ actor DownloadManager {
         }
     }
 
-    // MARK: - 检查依赖
+    // MARK: - 查找可执行文件（优先用 bundle 内的）
 
-    func checkDependencies() async throws {
-        guard try await checkCommand("yt-dlp") else {
-            throw DownloadError.ytDlpNotInstalled
+    private func executablePath(_ name: String) -> URL? {
+        // 1. 先找 bundle 里的（打包进 .app 的）
+        if let bundled = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "bin") {
+            return bundled
         }
-        guard try await checkCommand("ffmpeg") else {
-            throw DownloadError.ffmpegNotInstalled
-        }
-    }
-
-    private func checkCommand(_ cmd: String) async throws -> Bool {
+        // 2. 回退到 PATH
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["which", cmd]
+        process.arguments = ["which", name]
 
         let outputPipe = Pipe()
         process.standardOutput = outputPipe
         process.standardError = Pipe()
 
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                if let path = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+                    return URL(fileURLWithPath: path)
+                }
+            }
+        } catch { }
+        return nil
+    }
+
+    // MARK: - 检查依赖
+
+    func checkDependencies() async throws {
+        guard executablePath("yt-dlp") != nil else {
+            throw DownloadError.ytDlpNotInstalled
+        }
+        guard executablePath("ffmpeg") != nil else {
+            throw DownloadError.ffmpegNotInstalled
+        }
+    }
+
+    // MARK: - 运行命令
+
+    @discardableResult
+    private func runCommand(
+        _ executable: String,
+        arguments: [String],
+        captureOutput: Bool = false
+    ) async throws -> (status: Int32, output: String) {
+        guard let execURL = executablePath(executable) else {
+            throw DownloadError.downloadFailed("找不到可执行文件: \(executable)")
+        }
+
+        let process = Process()
+        process.executableURL = execURL
+        process.arguments = arguments
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
         try process.run()
         process.waitUntilExit()
 
-        return process.terminationStatus == 0
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+
+        return (process.terminationStatus, output + errorOutput)
     }
 
     // MARK: - 从 YouTube 获取标题
 
     func fetchTitle(from url: String) async throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["yt-dlp", "--no-playlist", "--get-title", url]
+        let (status, output) = try await runCommand("yt-dlp", arguments: [
+            "--no-playlist", "--get-title", url
+        ])
 
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = Pipe()
-
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            throw DownloadError.downloadFailed("无法获取视频信息")
+        guard status == 0 else {
+            throw DownloadError.downloadFailed(output)
         }
 
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let title = String(data: data, encoding: .utf8)?
+        let title = output
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ":", with: "-") ?? "Unknown Title"
+            .replacingOccurrences(of: ":", with: "-")
 
-        return title
+        return title.isEmpty ? "Unknown Title" : title
     }
 
-    // MARK: - 下载并转换（流式进度）
+    // MARK: - 下载并转换
 
     func downloadAndConvert(
         url: String,
@@ -97,53 +136,29 @@ actor DownloadManager {
         // 1. 下载
         progressHandler(0.1)
 
-        let downloadProcess = Process()
-        downloadProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        downloadProcess.arguments = [
-            "yt-dlp",
+        let (dlStatus, dlOutput) = try await runCommand("yt-dlp", arguments: [
             "--no-playlist",
             "-f", "bestaudio",
             "-o", tempFile.path,
             url
-        ]
+        ])
 
-        let downloadErrPipe = Pipe()
-        downloadProcess.standardError = downloadErrPipe
-        downloadProcess.standardOutput = Pipe()
-
-        try downloadProcess.run()
-        downloadProcess.waitUntilExit()
-
-        guard downloadProcess.terminationStatus == 0, FileManager.default.fileExists(atPath: tempFile.path) else {
-            let errData = downloadErrPipe.fileHandleForReading.readDataToEndOfFile()
-            let errMsg = String(data: errData, encoding: .utf8) ?? "未知错误"
-            throw DownloadError.downloadFailed(errMsg)
+        guard dlStatus == 0, FileManager.default.fileExists(atPath: tempFile.path) else {
+            throw DownloadError.downloadFailed(dlOutput)
         }
 
         progressHandler(0.6)
 
         // 2. 转 WAV
-        let convertProcess = Process()
-        convertProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        convertProcess.arguments = [
-            "ffmpeg",
+        let (cvStatus, cvOutput) = try await runCommand("ffmpeg", arguments: [
             "-y",
             "-i", tempFile.path,
             "-acodec", "pcm_s16le",
             wavFile.path
-        ]
+        ])
 
-        let convertErrPipe = Pipe()
-        convertProcess.standardError = convertErrPipe
-        convertProcess.standardOutput = Pipe()
-
-        try convertProcess.run()
-        convertProcess.waitUntilExit()
-
-        guard convertProcess.terminationStatus == 0, FileManager.default.fileExists(atPath: wavFile.path) else {
-            let errData = convertErrPipe.fileHandleForReading.readDataToEndOfFile()
-            let errMsg = String(data: errData, encoding: .utf8) ?? "未知错误"
-            throw DownloadError.conversionFailed(errMsg)
+        guard cvStatus == 0, FileManager.default.fileExists(atPath: wavFile.path) else {
+            throw DownloadError.conversionFailed(cvOutput)
         }
 
         progressHandler(0.95)
