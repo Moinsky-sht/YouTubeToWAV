@@ -26,14 +26,27 @@ actor DownloadManager {
         }
     }
 
-    // MARK: - 查找可执行文件（优先用 bundle 内的）
+    // MARK: - 查找可执行文件
 
     private func executablePath(_ name: String) -> URL? {
         // 1. 先找 bundle 里的（打包进 .app 的）
         if let bundled = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "bin") {
             return bundled
         }
-        // 2. 回退到 PATH
+
+        // 2. 直接检查常见 Homebrew 路径
+        //    （macOS GUI App 默认 PATH 不包含 /opt/homebrew/bin）
+        let homebrewPaths = [
+            "/opt/homebrew/bin/\(name)",   // Apple Silicon Mac
+            "/usr/local/bin/\(name)",       // Intel Mac
+        ]
+        for path in homebrewPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+
+        // 3. 通过 which 查找 PATH（终端运行时可工作）
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["which", name]
