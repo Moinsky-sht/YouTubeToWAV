@@ -1,0 +1,86 @@
+name: Build DMG
+
+on:
+  workflow_dispatch:   # 手动触发 —— 在 GitHub 页面点按钮即可
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install yt-dlp ffmpeg create-dmg
+
+      - name: Build (Release)
+        run: swift build -c release
+
+      - name: Package .app
+        run: |
+          APP="YouTubeToWAV.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          cp .build/release/YouTubeToWAV "$APP/Contents/MacOS/"
+          cp -r Sources/YouTubeToWAV/Resources/* "$APP/Contents/Resources/"
+
+          # Info.plist
+          cat > "$APP/Contents/Info.plist" <<-PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>zh_CN</string>
+            <key>CFBundleDisplayName</key>
+            <string>YouTubeToWAV</string>
+            <key>CFBundleExecutable</key>
+            <string>YouTubeToWAV</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.youtubetowav.app</string>
+            <key>CFBundleName</key>
+            <string>YouTubeToWAV</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0.0</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>14.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+          echo "APPL????" > "$APP/Contents/PkgInfo"
+
+          # Ad-hoc 签名（让 macOS 允许运行）
+          codesign --force --deep --sign - "$APP"
+
+      - name: Create DMG
+        run: |
+          create-dmg \
+            --volname "YouTubeToWAV" \
+            --window-pos 200 200 \
+            --window-size 400 300 \
+            --icon-size 100 \
+            --icon "YouTubeToWAV.app" 200 120 \
+            --app-drop-link 200 220 \
+            --no-internet-enable \
+            "YouTubeToWAV.dmg" \
+            "YouTubeToWAV.app"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTubeToWAV-dmg
+          path: YouTubeToWAV.dmg
