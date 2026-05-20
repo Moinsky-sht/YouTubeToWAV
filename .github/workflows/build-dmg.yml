@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -79,8 +81,20 @@ jobs:
             "YouTubeToWAV.dmg" \
             "YouTubeToWAV.app"
 
-      - name: Upload DMG
+      - name: Upload DMG (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: YouTubeToWAV-dmg
           path: YouTubeToWAV.dmg
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # 删除已有的 Release（如有），然后新建并上传
+          gh release delete "${GITHUB_REF_NAME}" --yes 2>/dev/null || true
+          gh release create "${GITHUB_REF_NAME}" YouTubeToWAV.dmg \
+            --title "YouTubeToWAV ${GITHUB_REF_NAME}" \
+            --notes "自动构建: 支持 Apple Silicon Mac 的 Homebrew 路径" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
